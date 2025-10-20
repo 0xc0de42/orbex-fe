@@ -1,50 +1,31 @@
+# ----- base -----
 FROM node:20-alpine AS base
-
-# Install dependencies only when needed
-FROM base AS deps
-RUN apk add --no-cache libc6-compat
 WORKDIR /app
+RUN apk add --no-cache libc6-compat && corepack enable
 
-# Install dependencies
-COPY package.json package-lock.json* ./
-RUN npm ci
+# Only lockfile + manifest first for better caching
+COPY package.json pnpm-lock.yaml ./
+RUN corepack prepare pnpm@9 --activate && pnpm fetch
 
-# Rebuild the source code only when needed
-FROM base AS builder
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
+# ----- build -----
+FROM base AS build
 COPY . .
+# If you removed the workspace file, this installs just this app
+RUN pnpm install --no-frozen-lockfile
+RUN pnpm build
 
-# Set environment variables for build
-ENV NEXT_TELEMETRY_DISABLED=1
-ENV NODE_ENV=production
-
-# Build the application
-RUN npm run build
-
-# Production image, copy all the files and run next
-FROM base AS runner
+# ----- runtime -----
+FROM node:20-alpine AS runtime
 WORKDIR /app
+RUN addgroup -S nextjs && adduser -S nextjs -G nextjs
 
-ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
-
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
-
-# Copy necessary files
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-
-# Set correct permissions
-RUN chown -R nextjs:nodejs /app
-
-USER nextjs
+# Copy minimal runtime artifacts
+COPY --from=build /app/.next ./.next
+COPY --from=build /app/public ./public
+COPY --from=build /app/package.json .
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/next.config.mjs ./next.config.mjs
 
 EXPOSE 3000
-
-ENV PORT=3000
-ENV HOSTNAME="0.0.0.0"
-
-CMD ["node", "server.js"]
+USER nextjs
+CMD ["node", "node_modules/next/dist/bin/next", "start", "-p", "3000"]
